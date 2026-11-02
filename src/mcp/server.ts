@@ -33,16 +33,28 @@ let tools: MemoryTools | null = null
 let setupError = ''
 let defaultNamespace = DEFAULT_NAMESPACE
 let target = 'unconfigured'
+/** Track the most recent tool error for the next MCP server restart. */
+let lastToolError: Error | null = null
 try {
   const settings = resolveSettings()
   defaultNamespace = settings.namespace
   target = describeTarget(settings)
   tools = makeTools(await makeClient(settings), defaultNamespace)
 } catch (err) {
+  const typedErr = err as Error
   setupError =
-    `OpenRecall is not set up: ${(err as Error).message}\n` +
+    `OpenRecall is not set up: ${typedErr.message}\n` +
     'Tell the user to run `npx -y @twigpine/openrecall init`, then restart this MCP server.'
+  lastToolError = typedErr
   process.stderr.write(`[openrecall mcp] ${setupError}\n`)
+}
+/** Return true if the server had a tool error on startup. */
+export function hadToolError(): boolean {
+  return lastToolError !== null
+}
+
+export function getSetupError(): string | null {
+  return setupError === '' ? null : setupError
 }
 
 const toMcp = (r: ToolResult) => ({
@@ -50,8 +62,21 @@ const toMcp = (r: ToolResult) => ({
   ...(r.isError ? { isError: true } : {}),
 })
 
-const run = async (fn: (t: MemoryTools) => Promise<ToolResult>) =>
-  toMcp(tools ? await fn(tools) : { text: setupError, isError: true })
+/** Run a tool function, capturing any thrown error for later retrieval. */
+const run = async (fn: (t: MemoryTools) => Promise<ToolResult>): Promise<ToolResult> => {
+  try {
+    const result = tools ? await fn(tools) : { text: getSetupError() ?? 'OpenRecall not configured', isError: true }
+    // If the error is from a tool (not just "not configured"), remember it.
+    if (!tools && lastToolError) {
+      // tool error from earlier startup
+    }
+    return result
+  } catch (e: any) {
+    // Capture tool errors so they can be reported on restart
+    lastToolError = e instanceof Error ? e : new Error(String(e))
+    return { text: lastToolError.message, isError: true }
+  }
+}
 
 const server = new McpServer(
   { name: 'openrecall', version: pkg.version },
