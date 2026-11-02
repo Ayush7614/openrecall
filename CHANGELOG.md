@@ -5,6 +5,33 @@ automatically by [release-please](https://github.com/googleapis/release-please)
 from [Conventional Commits](https://www.conventionalcommits.org/) — edit commit
 messages, not this file.
 
+## [0.2.0](https://github.com/Ayush7614/openrecall/compare/v0.1.0...v0.2.0) (2026-11-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* every public identifier is renamed. Nothing was published or deployed under the old names, so there is no migration path.
+    - package @gitlawb/memlawb -> @twigpine/openrecall; bin memlawb -> openrecall
+    - MemlawbClient / MemlawbClientOptions -> OpenRecallClient / OpenRecallClientOptions
+    - env MEMLAWB_* -> OPENRECALL_* (URL, API_KEY, PASSPHRASE, NAMESPACE, SCAN,
+      SUPABASE_URL, SUPABASE_SECRET_KEY)
+    - key-derivation salt "memlawb:" -> "openrecall:" (data encrypted under the old
+      salt cannot be decrypted)
+    - Supabase table memlawb_api_keys -> openrecall_api_keys
+    - skill memlawb-memory -> openrecall-memory; Fly app memlawb -> openrecall
+
+### Features
+
+* rebrand as OpenRecall by Twigpine and connect any agent ([#11](https://github.com/Ayush7614/openrecall/issues/11)) ([d4b0e8f](https://github.com/Ayush7614/openrecall/commit/d4b0e8f93f8175e3418bde22408fda2636520fb9))
+
+
+### Bug Fixes
+
+* **mcp:** add server robustness APIs ([9ebc1c1](https://github.com/Ayush7614/openrecall/commit/9ebc1c112b94990b024310369cd0b1625052b291))
+* **namespace:** hash namespace into slug to stop cross-tenant collisions ([0c9f82d](https://github.com/Ayush7614/openrecall/commit/0c9f82d022dace631bd8582ca3508adfab6809a8))
+* **namespace:** hash namespace into slug to stop cross-tenant collisions ([07d2a96](https://github.com/Ayush7614/openrecall/commit/07d2a96f575f4993972710eaaca0409e324bd255))
+* **review:** correct injective→collision-resistant wording; pin slug algorithm and hex format in tests ([29f0376](https://github.com/Ayush7614/openrecall/commit/29f0376d544decde27971f84d250fffb1a5d4396))
+
 ## 0.1.0 (2026-06-25)
 
 Initial release — open-source, self-hostable, zero-knowledge agent memory.
