@@ -75,12 +75,14 @@ To point an agent at a hosted service instead, print the block to paste:
 
 ```bash
 # prints the MCP config block, plus a fresh passphrase shown once
-OPENRECALL_API_KEY=<your key> openrecall card <owner> https://memory.twigpine.com
+openrecall card <owner> https://memory.twigpine.com
 ```
 
 The passphrase is generated locally and never leaves the machine: it is printed
 for you to store, and the block carries a placeholder rather than the value. The
-URL must be `https` unless it points at a loopback host.
+service key is never printed either, even if `OPENRECALL_API_KEY` is set; paste
+it into the block yourself. The URL must be `https` unless it points at a
+loopback host.
 
 That block is a public interface, not example output. The consumer integrations
 point back at it rather than restating it, and a test asserts that every
@@ -220,6 +222,18 @@ await memory.push('user:me', { 'MEMORY.md': '# what I know about the user' })
 const { entries } = await memory.pull('user:me')
 ```
 
+`push` reports what the store actually stored. The store validates each key and
+size itself and answers `200` even when it skips an entry, so check `skipped`
+before treating a push as saved:
+
+```ts
+const { uploaded, skipped } = await memory.push('user:me', { 'notes.md': '…' })
+// skipped: [{ key, reason }] — refused by the store, never counted as uploaded
+```
+
+`delete` returns `{ deleted }`, so a real removal can be told from a no-op on a
+key that was not stored.
+
 The entry points (`@twigpine/openrecall`, `/crypto`, `/secretscan`) ship as
 plain ESM with type declarations, for Node 24+, Bun, or any bundler. An agent
 that only needs memory tools is better served by the MCP server; the library is
@@ -308,6 +322,11 @@ answers a single status would blur: `404 empty` (no such namespace),
 `503 entry_unreadable` (the manifest names the key and the store cannot produce
 its body).
 
+`HEAD` is supported on the read routes: same status and headers, no body.
+Any other method on a known route is a `405` with an `Allow` header, and a
+malformed percent-escape in the path is a `400` `invalid_path` — client input
+never turns into a `500`.
+
 ## Configuration
 
 - **Client** (CLI and MCP server): `~/.openrecall/config.json`, written by
@@ -318,7 +337,9 @@ its body).
   moves the whole directory.
 - **Server:** [`.env.example`](./.env.example) documents `STORE` (`fs` | `s3`),
   `ALLOW_UNAUTHENTICATED`, `STATIC_API_KEYS` or Supabase auth, and the
-  per-namespace and per-account limits.
+  per-namespace and per-account limits. Values are validated at startup: an
+  unknown `STORE` or a malformed number stops the process and names the
+  variable.
 
 ## Status
 

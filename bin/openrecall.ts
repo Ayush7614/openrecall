@@ -22,6 +22,7 @@
 import { spawn } from 'node:child_process'
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve, sep } from 'node:path'
+import { flattenServerText } from '../client/index.ts'
 import { generateRetypablePassphrase, renderSetupCard } from '../client/setup.ts'
 import { describeTarget, makeClient } from '../src/cli/client.ts'
 import {
@@ -153,9 +154,21 @@ async function cmdPush(dir: string, namespace?: string) {
     entries[rel.split(sep).join('/')] = await readFile(join(dir, rel), 'utf8')
   }
   const r = await client.push(ns, entries)
-  console.log(
-    `pushed ${ns}: ${r.uploaded.length} uploaded, ${r.unchanged.length} unchanged → v${r.version}`,
-  )
+  const skipped = r.skipped ?? []
+  const summary = [`${r.uploaded.length} uploaded`, `${r.unchanged.length} unchanged`]
+  if (skipped.length) summary.push(`${skipped.length} rejected`)
+  console.log(`pushed ${ns}: ${summary.join(', ')} → v${r.version}`)
+  if (skipped.length) {
+    // The store answers 200 even when it drops entries, so a push that looks
+    // successful can have stored nothing. Name every dropped key and fail.
+    console.error(
+      `  ✗ ${skipped.length} entr${skipped.length === 1 ? 'y' : 'ies'} rejected by the store:`,
+    )
+    for (const x of skipped)
+      console.error(`      ${flattenServerText(x.key, 300)} (${flattenServerText(x.reason, 80)})`)
+    console.error('  nothing was saved for those keys — rename or resize them and push again')
+    process.exitCode = 1
+  }
 }
 
 async function cmdPull(dir: string, namespace?: string) {
@@ -176,13 +189,15 @@ async function cmdPull(dir: string, namespace?: string) {
 /**
  * Print the paste-in block plus a freshly generated passphrase. The passphrase
  * is produced here, on this machine, and shown once: nothing sends it anywhere
- * and nothing can recover it, so the warning is the feature.
+ * and nothing can recover it, so the warning is the feature. The service key
+ * is never printed, even when OPENRECALL_API_KEY is set: the block carries a
+ * placeholder so the key stays out of scrollback, logs and agent transcripts.
  */
 function cmdCard(owner: string, url: string | undefined) {
   const card = renderSetupCard('openclaude', {
     owner,
     url: url ?? process.env.OPENRECALL_URL ?? 'https://memory.twigpine.com',
-    apiKey: process.env.OPENRECALL_API_KEY ?? '<paste your service key here>',
+    apiKey: '<paste your service key here>',
   })
   console.log(card)
   console.log(
