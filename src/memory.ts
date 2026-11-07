@@ -106,6 +106,30 @@ async function readEntryBytes(
   return bytes ?? (await store.get(entryPath(nsSlug, sha256Hex(key)))) ?? null
 }
 
+/**
+ * Run `fn` over `items` with at most `limit` calls in flight.
+ *
+ * A full read fans out over up to maxEntriesPerNamespace entries. Issuing them
+ * all at once means one store request per entry at the same time: on S3 that is
+ * one socket and one in-flight body per entry, and on the filesystem driver one
+ * open file per entry. Workers pull from a shared cursor instead, so the pool
+ * stays full without pre-scheduling every item.
+ */
+export async function mapPool<T>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<void>,
+): Promise<void> {
+  let next = 0
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const item = items[next++]
+      await fn(item)
+    }
+  })
+  await Promise.all(workers)
+}
+
 /** Full view: fetch every ciphertext entry blob. */
 export async function getData(namespace: string, nsSlug: string): Promise<MemoryData> {
   const m = await readManifest(nsSlug)
@@ -118,15 +142,13 @@ export async function getData(namespace: string, nsSlug: string): Promise<Memory
   // itself; nothing here reads or derives anything from plaintext.
   const entryUpdatedAt: Record<string, string> = {}
 
-  await Promise.all(
-    Object.entries(m.entries).map(async ([key, meta]) => {
-      const bytes = await readEntryBytes(store, nsSlug, key, meta.hash)
-      if (!bytes) return // manifest/blob drift — skip rather than 500
-      entries[key] = Buffer.from(bytes).toString('base64')
-      entryChecksums[key] = meta.hash
-      entryUpdatedAt[key] = meta.updatedAt
-    }),
-  )
+  await mapPool(Object.entries(m.entries), config.storeConcurrency, async ([key, meta]) => {
+    const bytes = await readEntryBytes(store, nsSlug, key, meta.hash)
+    if (!bytes) return // manifest/blob drift — skip rather than 500
+    entries[key] = Buffer.from(bytes).toString('base64')
+    entryChecksums[key] = meta.hash
+    entryUpdatedAt[key] = meta.updatedAt
+  })
 
   return {
     namespace,
