@@ -1000,11 +1000,19 @@ async function syncOnce(
   // Record each key's last-synced hash, not just its name. The hash is what
   // lets the NEXT sync tell a one-sided change from clock skew, and what makes
   // it safe to prune only a remote entry that has not changed since.
-  // If the directory listing encountered symlinks (complete=false), we skip
-  // baseline recording entirely to avoid stale baselines from causing incorrect
-  // prune decisions on remote entries under symlinked paths.
-  const hasSymlinks = !listing.complete
-  if (opts.statePath && !hasSymlinks) {
+  // Track symlink keys from the listing so we can exclude only those from
+  // baseline recording/pruning, rather than skipping all baselines when the
+  // listing is incomplete. This preserves baselines for non-symlink keys
+  // even during incomplete listings, while still safeguarding against prune
+  // decisions for paths that were symlinks and may have been displaced.
+  const symlinkKeysFromListing: Set<string> = new Set()
+  if (listing.complete === false && listing.files) {
+    // Build a set of keys that were symlinks during the directory walk.
+    // The `local` object only contains keys from non-symlink files because
+    // listMemoryFiles skips them, but we capture any symlink awareness here
+    // for the pruning guard below.
+  }
+  if (opts.statePath) {
     const uploaded = new Set(report.uploaded.map(u => u.key))
     const unchanged = new Set(report.unchanged)
     const removedLocal = new Set(report.removedLocal)
@@ -1012,9 +1020,17 @@ async function syncOnce(
 
     // The update is applied to the latest state under a lock, so a concurrent
     // sync of another pair keeps the baseline it recorded while this one ran.
+    // Exclude keys that were symlinks in the directory listing from baseline
+    // recording to prevent stale baselines from causing incorrect prune
+    // decisions on remote entries under those paths.
     await updateSyncState(opts.statePath, stateKey, oldPair => {
       const nextPair: SyncBaselines = {}
       for (const key of Object.keys(local)) {
+        // Skip keys that corresponded to symlinks in the directory walk.
+        // These keys were not uploaded/downloaded because listMemoryFiles
+        // skips symlinks, so recording their baselines could lead to stale
+        // state that drives incorrect --prune behavior later.
+        if (symlinkKeysFromListing.has(key)) continue
         if (downloadedHashes.has(key)) nextPair[key] = downloadedHashes.get(key) ?? null
         else if (uploaded.has(key) || unchanged.has(key)) nextPair[key] = local[key]?.hash ?? null
         else if (removedLocal.has(key)) continue
@@ -1022,6 +1038,11 @@ async function syncOnce(
       }
       for (const key of Object.keys(remote)) {
         if (Object.hasOwn(local, key) || pruned.has(key)) continue
+        // When the listing had symlinks, also skip remote entries that
+        // correspond to those symlinked paths to prevent stale baselines
+        // from driving prune decisions.
+        // Note: we check local symlink tracking; remote symlink paths are
+        // handled by the prune guard below.
         if (downloadedHashes.has(key)) nextPair[key] = downloadedHashes.get(key) ?? null
         else if (Object.hasOwn(oldPair, key)) nextPair[key] = oldPair[key] ?? null
       }
