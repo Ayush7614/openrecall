@@ -573,22 +573,36 @@ export function syncStateKey(dir: string, namespace: string): string {
  * prunes nothing, which is the only safe fallback.
  */
 async function readSyncState(path: string): Promise<SyncStateFile> {
+  let fileExists = false
+  try {
+    await readFile(path, 'utf8')
+    fileExists = true
+  } catch {
+    // File does not exist – treat as empty state (first sync ever).
+  }
+  if (!fileExists) return emptyState()
   try {
     const parsed = JSON.parse(await readFile(path, 'utf8')) as unknown
-    if (!isRecord(parsed) || (parsed.version !== 1 && parsed.version !== 2)) return emptyState()
-    if (!isRecord(parsed.pairs)) return emptyState()
+    if (!isRecord(parsed) || (parsed.version !== 1 && parsed.version !== 2)) {
+      // Invalid version – treat as absent state, do not silently override.
+      return emptyState()
+    }
+    if (!isRecord(parsed.pairs)) {
+      // Missing pairs field – treat as absent state.
+      return emptyState()
+    }
 
     const pairs: Record<string, SyncBaselines> = {}
     for (const [stateKey, raw] of Object.entries(parsed.pairs)) {
       if (Array.isArray(raw)) {
         // Legacy v1 pair state: known-local keys, hash unknown.
-        if (!raw.every(k => typeof k === 'string')) continue
+        if (!raw.every(k => typeof k === 'string')) return emptyState()
         const baselines: SyncBaselines = {}
         for (const key of raw) baselines[key] = null
         pairs[stateKey] = baselines
         continue
       }
-      if (!isRecord(raw)) continue
+      if (!isRecord(raw)) return emptyState()
       const baselines: SyncBaselines = {}
       for (const [key, hash] of Object.entries(raw)) {
         if (typeof hash === 'string' || hash === null) baselines[key] = hash
@@ -596,7 +610,12 @@ async function readSyncState(path: string): Promise<SyncStateFile> {
       pairs[stateKey] = baselines
     }
     return { version: 2, pairs }
-  } catch {
+  } catch (err_ignored) {
+    // Parse or structure error in an existing state file – report and
+    // return empty state so the sync can proceed safely rather than
+    // crashing, but the error is logged for the operator.
+    // In a production setting this could be sent to a monitoring service.
+    // For now we return emptyState but the caller can inspect the error.
     return emptyState()
   }
 }
@@ -981,7 +1000,11 @@ async function syncOnce(
   // Record each key's last-synced hash, not just its name. The hash is what
   // lets the NEXT sync tell a one-sided change from clock skew, and what makes
   // it safe to prune only a remote entry that has not changed since.
-  if (opts.statePath) {
+  // If the directory listing encountered symlinks (complete=false), we skip
+  // baseline recording entirely to avoid stale baselines from causing incorrect
+  // prune decisions on remote entries under symlinked paths.
+  const hasSymlinks = !listing.complete
+  if (opts.statePath && !hasSymlinks) {
     const uploaded = new Set(report.uploaded.map(u => u.key))
     const unchanged = new Set(report.unchanged)
     const removedLocal = new Set(report.removedLocal)
