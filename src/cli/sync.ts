@@ -684,6 +684,11 @@ export type SyncReport = {
   downloadSkipped: { key: string; reason: DownloadSkipReason }[]
 }
 
+/** Longest a sync lock may sit unrefreshed before another process takes it. */
+const SYNC_LOCK_STALE_MS = 60_000
+/** Refresh cadence, comfortably below the stale threshold. */
+const SYNC_LOCK_HEARTBEAT_MS = 15_000
+
 /**
  * Sync `dir` with `opts.namespace` once and report exactly what moved.
  *
@@ -699,7 +704,35 @@ export async function runSync(
 ): Promise<SyncReport> {
   const root = resolve(dir)
   const ns = opts.namespace
+  const stateKey = syncStateKey(root, ns)
 
+  // A dry run writes nothing, so it neither needs the pair lock nor blocks a
+  // real sync. Without a state file there are no baselines for two runs to
+  // overwrite, and the file writes keep their own rechecks.
+  if (!opts.statePath || opts.dryRun) return syncOnce(root, ns, client, opts, stateKey)
+
+  // Serialize the whole run for one (directory, namespace) pair. Locking only
+  // the state update still lets an older run snapshot the baselines, wait while
+  // a newer run syncs an edit and records it, then write its stale snapshot
+  // over the newer baseline. A later one-sided edit would then look two-sided
+  // and could lose to clock skew. The heartbeat keeps a slow network sync from
+  // looking abandoned while another process waits.
+  const statePath = opts.statePath
+  await mkdir(dirname(statePath), { recursive: true, mode: 0o700 })
+  return withDirLock(
+    `${statePath}.${stateKey}.sync-lock`,
+    () => syncOnce(root, ns, client, opts, stateKey),
+    { staleMs: SYNC_LOCK_STALE_MS, heartbeatMs: SYNC_LOCK_HEARTBEAT_MS },
+  )
+}
+
+async function syncOnce(
+  root: string,
+  ns: string,
+  client: OpenRecallClient,
+  opts: SyncOptions,
+  stateKey: string,
+): Promise<SyncReport> {
   // Read local files once: content for hashing and uploading, mtime for
   // conflict ordering. A failed listing still yields the files it found, but
   // `complete` tells pruning not to treat the absence as local deletions.
@@ -754,7 +787,6 @@ export async function runSync(
   }
 
   const state = opts.statePath ? await readSyncState(opts.statePath) : undefined
-  const stateKey = syncStateKey(root, ns)
   const baselines = state?.pairs[stateKey]
   const plan = planSync({
     local,
@@ -922,6 +954,17 @@ export async function runSync(
       current !== null &&
       (!current.isFile() || current.mtimeMs !== planned.mtimeMs)
     ) {
+      report.remoteDeleted.push(a.key)
+      continue
+    }
+    // The plan's remote deletion was observed at the start of the sync. Another
+    // client can restore the key while downloads and uploads run; the mtime
+    // guard above only catches edits made after the local snapshot, not a local
+    // edit that was already there. Re-read metadata immediately before
+    // unlinking: content that is back is something the next sync must
+    // reconcile, never a local file this run may delete.
+    const fresh = await client.metadata(ns, { observe: false })
+    if (Object.hasOwn(fresh.entryChecksums, a.key)) {
       report.remoteDeleted.push(a.key)
       continue
     }

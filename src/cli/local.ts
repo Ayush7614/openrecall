@@ -12,7 +12,7 @@
  * concurrent read-modify-write cycles on a manifest can't lose updates.
  */
 
-import { mkdir, rm, stat } from 'node:fs/promises'
+import { mkdir, rm, stat, utimes } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import type { FetchLike } from '../../client/index.ts'
 
@@ -25,7 +25,22 @@ const LOCK_STALE_MS = 30_000
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
-export async function withDirLock<T>(lockDir: string, fn: () => Promise<T>): Promise<T> {
+export type DirLockOptions = {
+  /** Age at which an unrefreshed lock is treated as abandoned. */
+  staleMs?: number
+  /**
+   * Refresh the lock's mtime at this cadence. A holder that outlives `staleMs`
+   * — a sync doing network work — must not look abandoned to a second process.
+   */
+  heartbeatMs?: number
+}
+
+export async function withDirLock<T>(
+  lockDir: string,
+  fn: () => Promise<T>,
+  opts: DirLockOptions = {},
+): Promise<T> {
+  const staleMs = opts.staleMs ?? LOCK_STALE_MS
   const deadline = Date.now() + LOCK_WAIT_MS
   for (;;) {
     try {
@@ -37,7 +52,7 @@ export async function withDirLock<T>(lockDir: string, fn: () => Promise<T>): Pro
         s => Date.now() - s.mtimeMs,
         () => 0, // released between our mkdir and stat — just retry
       )
-      if (age > LOCK_STALE_MS) {
+      if (age > staleMs) {
         await rm(lockDir, { recursive: true, force: true })
         continue
       }
@@ -47,9 +62,18 @@ export async function withDirLock<T>(lockDir: string, fn: () => Promise<T>): Pro
       await sleep(10 + Math.random() * 40)
     }
   }
+  let heartbeat: ReturnType<typeof setInterval> | undefined
+  if (opts.heartbeatMs !== undefined) {
+    heartbeat = setInterval(() => {
+      const now = new Date()
+      void utimes(lockDir, now, now).catch(() => {})
+    }, opts.heartbeatMs)
+    heartbeat.unref?.()
+  }
   try {
     return await fn()
   } finally {
+    if (heartbeat !== undefined) clearInterval(heartbeat)
     await rm(lockDir, { recursive: true, force: true })
   }
 }

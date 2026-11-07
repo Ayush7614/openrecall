@@ -1277,6 +1277,62 @@ describe('runSync remote deletions', () => {
     expect(r.remoteDeleted).toEqual(['gone.md'])
     expect(readFileSync(path, 'utf8')).toBe('edited during the sync')
   })
+
+  test('--prefer remote keeps the file when the key reappears before removal', async () => {
+    const ns = 'user:sync-remote-delete-reappear'
+    const dir = tempDir()
+    const state = join(tempDir(), 'state.json')
+    const path = put(dir, 'gone.md', 'local copy')
+    const client = await realClient()
+    await runSync(dir, client, { namespace: ns, statePath: state })
+
+    const other = await realClient()
+    await other.delete(ns, 'gone.md')
+
+    let metadataCalls = 0
+    let releaseRecheck: (() => void) | undefined
+    const recheckGate = new Promise<void>(resolve => {
+      releaseRecheck = resolve
+    })
+    let recheckStarted: (() => void) | undefined
+    const started = new Promise<void>(resolve => {
+      recheckStarted = resolve
+    })
+    const delayed = new Proxy(client, {
+      /** Hold the removal's fresh metadata read until the key is restored. */
+      get(target, prop) {
+        const value = Reflect.get(target, prop, target)
+        if (prop === 'metadata') {
+          return async (...args: unknown[]) => {
+            metadataCalls += 1
+            if (metadataCalls === 2) {
+              recheckStarted?.()
+              await recheckGate
+            }
+            return (value as (...a: unknown[]) => Promise<unknown>).call(target, ...args)
+          }
+        }
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    }) as InstanceType<typeof OpenRecallClient>
+
+    const run = runSync(dir, delayed, {
+      namespace: ns,
+      statePath: state,
+      prefer: 'remote',
+    })
+    await started
+    // The plan saw a deletion; another client restores the key while the
+    // removal is about to unlink the local file.
+    await other.push(ns, { 'gone.md': 'restored remotely' })
+    releaseRecheck?.()
+    const r = await run
+
+    expect(r.removedLocal).toEqual([])
+    expect(r.remoteDeleted).toEqual(['gone.md'])
+    expect(readFileSync(path, 'utf8')).toBe('local copy')
+    expect((await other.pull(ns)).entries['gone.md']).toBe('restored remotely')
+  })
 })
 
 describe('sync state under concurrent syncs', () => {
@@ -1325,6 +1381,66 @@ describe('sync state under concurrent syncs', () => {
       expect(recorded.pairs[stateKey]?.[key]).toMatch(/^sha256:/)
     }
     expect(existsSync(`${state}.lock`)).toBe(false)
+  })
+
+  test('same-pair syncs serialize, so an older run cannot replace a newer baseline', async () => {
+    const ns = 'user:sync-state-same-pair'
+    const dir = tempDir()
+    const state = join(tempDir(), 'state.json')
+    put(dir, 'note.md', 'v1')
+    const client = await realClient()
+    await runSync(dir, client, { namespace: ns, statePath: state })
+    put(dir, 'note.md', 'v2')
+
+    let releaseFirst: (() => void) | undefined
+    const firstGate = new Promise<void>(resolve => {
+      releaseFirst = resolve
+    })
+    let firstStarted: (() => void) | undefined
+    const started = new Promise<void>(resolve => {
+      firstStarted = resolve
+    })
+    let metadataCalls = 0
+    const delayed = new Proxy(client, {
+      /** Hold the first run after its snapshots are read. */
+      get(target, prop) {
+        const value = Reflect.get(target, prop, target)
+        if (prop === 'metadata') {
+          return async (...args: unknown[]) => {
+            metadataCalls += 1
+            if (metadataCalls === 1) {
+              firstStarted?.()
+              await firstGate
+            }
+            return (value as (...a: unknown[]) => Promise<unknown>).call(target, ...args)
+          }
+        }
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    }) as InstanceType<typeof OpenRecallClient>
+
+    const first = runSync(dir, delayed, { namespace: ns, statePath: state })
+    await started
+    const second = runSync(dir, delayed, { namespace: ns, statePath: state })
+    // Without a pair lock the second run reaches its metadata read at once and
+    // finishes with baselines captured before the first run's upload.
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(metadataCalls).toBe(1)
+
+    releaseFirst?.()
+    const [a, b] = await Promise.all([first, second])
+
+    expect(metadataCalls).toBe(2)
+    expect(a.uploaded).toEqual([{ key: 'note.md', reason: 'local-newer' }])
+    expect(b.unchanged).toContain('note.md')
+    const stateKey = await syncStateKeyOf(dir, ns)
+    const recorded = JSON.parse(readFileSync(state, 'utf8')) as {
+      pairs: Record<string, Record<string, string | null>>
+    }
+    expect(recorded.pairs[stateKey]?.['note.md']).toBe(
+      client.ciphertextHashOf(ns, 'note.md', 'v2'),
+    )
+    expect(existsSync(`${state}.${stateKey}.sync-lock`)).toBe(false)
   })
 })
 
