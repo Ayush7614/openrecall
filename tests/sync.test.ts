@@ -481,21 +481,29 @@ describe('formatSyncReport', () => {
 
   test('control characters in keys cannot forge report lines', () => {
     const evil = 'note.md\n\u001b[2J\u001b[31mforged'
-    const { out } = formatSyncReport(
+    const evilReason = 'local-missing\n\u001b[2Jforged'
+    const { out, err } = formatSyncReport(
       {
         ...report,
         uploaded: [{ key: evil, reason: 'remote-missing' }],
         downloaded: [{ key: evil, reason: 'local-missing' }],
         pruned: [evil],
         removedLocal: [evil],
+        unresolved: [evil],
+        remoteDeleted: [evil],
+        downloadSkipped: [{ key: evil, reason: 'vanished' }],
+        skipped: [{ key: evil, reason: evilReason }],
       },
       '/tmp/memories',
     )
 
     expect(out).toHaveLength(5)
-    expect(out.join('\n')).not.toContain('\u001b')
+    expect(err).toHaveLength(4)
+    const lines = [...out, ...err]
+    expect(lines.every(line => !line.includes('\n'))).toBe(true)
+    expect(lines.every(line => !line.includes('\u001b'))).toBe(true)
     expect(out.join('\n')).toContain('note.md forged')
-    expect(out.some(line => line.trimStart().startsWith('forged'))).toBe(false)
+    expect(lines.some(line => line.trimStart().startsWith('forged'))).toBe(false)
   })
 })
 
