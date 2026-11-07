@@ -1437,9 +1437,7 @@ describe('sync state under concurrent syncs', () => {
     const recorded = JSON.parse(readFileSync(state, 'utf8')) as {
       pairs: Record<string, Record<string, string | null>>
     }
-    expect(recorded.pairs[stateKey]?.['note.md']).toBe(
-      client.ciphertextHashOf(ns, 'note.md', 'v2'),
-    )
+    expect(recorded.pairs[stateKey]?.['note.md']).toBe(client.ciphertextHashOf(ns, 'note.md', 'v2'))
     expect(existsSync(`${state}.${stateKey}.sync-lock`)).toBe(false)
   })
 })
