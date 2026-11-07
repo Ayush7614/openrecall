@@ -610,7 +610,7 @@ async function readSyncState(path: string): Promise<SyncStateFile> {
       pairs[stateKey] = baselines
     }
     return { version: 2, pairs }
-  } catch (err_ignored) {
+  } catch (_err) {
     // Parse or structure error in an existing state file – report and
     // return empty state so the sync can proceed safely rather than
     // crashing, but the error is logged for the operator.
